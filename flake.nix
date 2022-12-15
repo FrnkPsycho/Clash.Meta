@@ -23,7 +23,7 @@
       {
         overlay = final: prev: {
 
-          clash-meta = final.buildGoModule {
+          clash-meta = final.buildGo119Module {
             pname = "clash-meta";
             inherit version;
             src = ./.;
@@ -43,7 +43,7 @@
             ];
             
             tags = [
-              # "with_gvisor"
+              "with_gvisor"
             ];
 
             # Network required 
