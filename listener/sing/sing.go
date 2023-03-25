@@ -5,6 +5,7 @@ import (
 	"errors"
 	"golang.org/x/exp/slices"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -24,10 +25,11 @@ import (
 const UDPTimeout = 5 * time.Minute
 
 type ListenerHandler struct {
-	TcpIn     chan<- C.ConnContext
-	UdpIn     chan<- C.PacketAdapter
-	Type      C.Type
-	Additions []inbound.Addition
+	TcpIn      chan<- C.ConnContext
+	UdpIn      chan<- C.PacketAdapter
+	Type       C.Type
+	Additions  []inbound.Addition
+	UDPTimeout time.Duration
 }
 
 type waitCloseConn struct {
@@ -48,6 +50,10 @@ func (c *waitCloseConn) RemoteAddr() net.Addr {
 	return c.rAddr
 }
 
+func (c *waitCloseConn) Upstream() any {
+	return c.Conn
+}
+
 func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	additions := h.Additions
 	if ctxAdditions := getAdditions(ctx); len(ctxAdditions) > 0 {
@@ -57,9 +63,16 @@ func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, meta
 	switch metadata.Destination.Fqdn {
 	case vmess.MuxDestination.Fqdn:
 		return vmess.HandleMuxConnection(ctx, conn, h)
-	case uot.UOTMagicAddress:
-		metadata.Destination = M.Socksaddr{}
-		return h.NewPacketConnection(ctx, uot.NewClientConn(conn), metadata)
+	case uot.MagicAddress:
+		request, err := uot.ReadRequest(conn)
+		if err != nil {
+			return E.Cause(err, "read UoT request")
+		}
+		metadata.Destination = request.Destination
+		return h.NewPacketConnection(ctx, uot.NewConn(conn, *request), metadata)
+	case uot.LegacyMagicAddress:
+		metadata.Destination = M.Socksaddr{Addr: netip.IPv4Unspecified()}
+		return h.NewPacketConnection(ctx, uot.NewConn(conn, uot.Request{}), metadata)
 	}
 	target := socks5.ParseAddr(metadata.Destination.String())
 	wg := &sync.WaitGroup{}
@@ -146,7 +159,10 @@ func (c *packet) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 		err = errors.New("writeBack to closed connection")
 		return
 	}
-	err = conn.WritePacket(buff, M.ParseSocksaddr(addr.String()))
+	err = conn.WritePacket(buff, M.SocksaddrFromNet(addr))
+	if err != nil {
+		return
+	}
 	return
 }
 
@@ -161,4 +177,12 @@ func (c *packet) Drop() {
 
 func (c *packet) InAddr() net.Addr {
 	return c.lAddr
+}
+
+func (c *packet) SetNatTable(natTable C.NatTable) {
+	// no need
+}
+
+func (c *packet) SetUdpInChan(in chan<- C.PacketAdapter) {
+	// no need
 }

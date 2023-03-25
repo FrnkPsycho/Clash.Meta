@@ -18,6 +18,8 @@ import (
 	"github.com/Dreamacro/clash/transport/tuic"
 )
 
+const ServerMaxIncomingStreams = (1 << 32) - 1
+
 type Listener struct {
 	closed       bool
 	config       LC.TuicServer
@@ -47,14 +49,27 @@ func New(config LC.TuicServer, tcpIn chan<- C.ConnContext, udpIn chan<- C.Packet
 	}
 	quicConfig := &quic.Config{
 		MaxIdleTimeout:        time.Duration(config.MaxIdleTime) * time.Millisecond,
-		MaxIncomingStreams:    1 >> 32,
-		MaxIncomingUniStreams: 1 >> 32,
+		MaxIncomingStreams:    ServerMaxIncomingStreams,
+		MaxIncomingUniStreams: ServerMaxIncomingStreams,
 		EnableDatagrams:       true,
+		Allow0RTT: func(addr net.Addr) bool {
+			return true
+		},
 	}
 	quicConfig.InitialStreamReceiveWindow = tuic.DefaultStreamReceiveWindow / 10
 	quicConfig.MaxStreamReceiveWindow = tuic.DefaultStreamReceiveWindow
 	quicConfig.InitialConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow / 10
 	quicConfig.MaxConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow
+
+	if config.MaxUdpRelayPacketSize == 0 {
+		config.MaxUdpRelayPacketSize = 1500
+	}
+	maxDatagramFrameSize := config.MaxUdpRelayPacketSize + tuic.PacketOverHead
+	if maxDatagramFrameSize > 1400 {
+		maxDatagramFrameSize = 1400
+	}
+	config.MaxUdpRelayPacketSize = maxDatagramFrameSize - tuic.PacketOverHead
+	quicConfig.MaxDatagramFrameSize = int64(maxDatagramFrameSize)
 
 	tokens := make([][32]byte, len(config.Token))
 	for i, token := range config.Token {

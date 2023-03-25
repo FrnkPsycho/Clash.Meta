@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dreamacro/clash/common/cache"
+	N "github.com/Dreamacro/clash/common/net"
 	"github.com/Dreamacro/clash/common/nnip"
 	"github.com/Dreamacro/clash/common/picker"
 	"github.com/Dreamacro/clash/component/dialer"
@@ -27,6 +28,13 @@ const (
 )
 
 func putMsgToCache(c *cache.LruCache[string, *D.Msg], key string, msg *D.Msg) {
+	// skip dns cache for acme challenge
+	if len(msg.Question) != 0 {
+		if q := msg.Question[0]; q.Qtype == D.TypeTXT && strings.HasPrefix(q.Name, "_acme-challenge") {
+			log.Debugln("[DNS] dns cache ignored because of acme challenge for: %s", q.Name)
+			return
+		}
+	}
 	var ttl uint32
 	switch {
 	case len(msg.Answer) != 0:
@@ -58,7 +66,7 @@ func setMsgTTL(msg *D.Msg, ttl uint32) {
 }
 
 func isIPRequest(q D.Question) bool {
-	return q.Qclass == D.ClassINET && (q.Qtype == D.TypeA || q.Qtype == D.TypeAAAA)
+	return q.Qclass == D.ClassINET && (q.Qtype == D.TypeA || q.Qtype == D.TypeAAAA || q.Qtype == D.TypeCNAME)
 }
 
 func transform(servers []NameServer, resolver *Resolver) []dnsClient {
@@ -134,32 +142,6 @@ func msgToDomain(msg *D.Msg) string {
 	return ""
 }
 
-type wrapPacketConn struct {
-	net.PacketConn
-	rAddr net.Addr
-}
-
-func (wpc *wrapPacketConn) Read(b []byte) (n int, err error) {
-	n, _, err = wpc.PacketConn.ReadFrom(b)
-	return n, err
-}
-
-func (wpc *wrapPacketConn) Write(b []byte) (n int, err error) {
-	return wpc.PacketConn.WriteTo(b, wpc.rAddr)
-}
-
-func (wpc *wrapPacketConn) RemoteAddr() net.Addr {
-	return wpc.rAddr
-}
-
-func (wpc *wrapPacketConn) LocalAddr() net.Addr {
-	if wpc.PacketConn.LocalAddr() == nil {
-		return &net.UDPAddr{IP: net.IPv4zero, Port: 0}
-	} else {
-		return wpc.PacketConn.LocalAddr()
-	}
-}
-
 type dialHandler func(ctx context.Context, network, addr string) (net.Conn, error)
 
 func getDialHandler(r *Resolver, proxyAdapter string, opts ...dialer.Option) dialHandler {
@@ -213,10 +195,7 @@ func getDialHandler(r *Resolver, proxyAdapter string, opts ...dialer.Option) dia
 					return nil, err
 				}
 
-				return &wrapPacketConn{
-					PacketConn: packetConn,
-					rAddr:      metadata.UDPAddr(),
-				}, nil
+				return N.NewBindPacketConn(packetConn, metadata.UDPAddr()), nil
 			}
 		}
 	}
@@ -256,15 +235,18 @@ func listenPacket(ctx context.Context, proxyAdapter string, network string, addr
 
 func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, err error) {
 	fast, ctx := picker.WithTimeout[*D.Msg](ctx, resolver.DefaultDNSTimeout)
+	domain := msgToDomain(m)
 	for _, client := range clients {
 		r := client
 		fast.Go(func() (*D.Msg, error) {
+			log.Debugln("[DNS] resolve %s from %s", domain, r.Address())
 			m, err := r.ExchangeContext(ctx, m)
 			if err != nil {
 				return nil, err
 			} else if m.Rcode == D.RcodeServerFailure || m.Rcode == D.RcodeRefused {
 				return nil, errors.New("server failure")
 			}
+			log.Debugln("[DNS] %s --> %s, from %s", domain, msgToIP(m), r.Address())
 			return m, nil
 		})
 	}
@@ -277,7 +259,6 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 		}
 		return nil, err
 	}
-
 	msg = elm
 	return
 }

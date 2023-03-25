@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
+
 	"github.com/Dreamacro/clash/adapter/outbound"
+	"github.com/Dreamacro/clash/common/callback"
+	N "github.com/Dreamacro/clash/common/net"
 	"github.com/Dreamacro/clash/component/dialer"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/constant/provider"
-	"time"
 )
 
 type Fallback struct {
@@ -29,9 +32,21 @@ func (f *Fallback) DialContext(ctx context.Context, metadata *C.Metadata, opts .
 	c, err := proxy.DialContext(ctx, metadata, f.Base.DialOptions(opts...)...)
 	if err == nil {
 		c.AppendToChains(f)
-		f.onDialSuccess()
 	} else {
 		f.onDialFailed(proxy.Type(), err)
+	}
+
+	if N.NeedHandshake(c) {
+		c = &callback.FirstWriteCallBackConn{
+			Conn: c,
+			Callback: func(err error) {
+				if err == nil {
+					f.onDialSuccess()
+				} else {
+					f.onDialFailed(proxy.Type(), err)
+				}
+			},
+		}
 	}
 
 	return c, err
@@ -132,6 +147,7 @@ func NewFallback(option *GroupCommonOption, providers []provider.ProxyProvider) 
 			},
 			option.Filter,
 			option.ExcludeFilter,
+			option.ExcludeType,
 			providers,
 		}),
 		disableUDP: option.DisableUDP,

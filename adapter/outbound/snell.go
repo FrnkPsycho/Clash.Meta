@@ -78,15 +78,20 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 		return NewConn(c, s), err
 	}
 
-	c, err := dialer.DialContext(ctx, "tcp", s.addr, s.Base.DialOptions(opts...)...)
+	return s.DialContextWithDialer(ctx, dialer.NewDialer(s.Base.DialOptions(opts...)...), metadata)
+}
+
+// DialContextWithDialer implements C.ProxyAdapter
+func (s *Snell) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.Conn, err error) {
+	c, err := dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
 	}
 	tcpKeepAlive(c)
 
-	defer func() {
+	defer func(c net.Conn) {
 		safeConnClose(c, err)
-	}()
+	}(c)
 
 	c, err = s.StreamConn(c, metadata)
 	return NewConn(c, s), err
@@ -94,7 +99,12 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 
 // ListenPacketContext implements C.ProxyAdapter
 func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
-	c, err := dialer.DialContext(ctx, "tcp", s.addr, s.Base.DialOptions(opts...)...)
+	return s.ListenPacketWithDialer(ctx, dialer.NewDialer(s.Base.DialOptions(opts...)...), metadata)
+}
+
+// ListenPacketWithDialer implements C.ProxyAdapter
+func (s *Snell) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (C.PacketConn, error) {
+	c, err := dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -110,10 +120,9 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata, o
 	return newPacketConn(pc, s), nil
 }
 
-// ListenPacketOnStreamConn implements C.ProxyAdapter
-func (s *Snell) ListenPacketOnStreamConn(c net.Conn, metadata *C.Metadata) (_ C.PacketConn, err error) {
-	pc := snell.PacketConn(c)
-	return newPacketConn(pc, s), nil
+// SupportWithDialer implements C.ProxyAdapter
+func (s *Snell) SupportWithDialer() bool {
+	return true
 }
 
 // SupportUOT implements C.ProxyAdapter
@@ -158,6 +167,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			addr:   addr,
 			tp:     C.Snell,
 			udp:    option.UDP,
+			tfo:    option.TFO,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),

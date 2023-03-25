@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/Dreamacro/clash/component/dialer"
@@ -81,14 +83,21 @@ type PacketConn interface {
 	// WriteWithMetadata(p []byte, metadata *Metadata) (n int, err error)
 }
 
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+	ListenPacket(ctx context.Context, network, address string, rAddrPort netip.AddrPort) (net.PacketConn, error)
+}
+
 type ProxyAdapter interface {
 	Name() string
 	Type() AdapterType
 	Addr() string
 	SupportUDP() bool
+	SupportXUDP() bool
 	SupportTFO() bool
 	MarshalJSON() ([]byte, error)
 
+	// Deprecated: use DialContextWithDialer and ListenPacketWithDialer instead.
 	// StreamConn wraps a protocol around net.Conn with Metadata.
 	//
 	// Examples:
@@ -106,7 +115,10 @@ type ProxyAdapter interface {
 
 	// SupportUOT return UDP over TCP support
 	SupportUOT() bool
-	ListenPacketOnStreamConn(c net.Conn, metadata *Metadata) (PacketConn, error)
+
+	SupportWithDialer() bool
+	DialContextWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (Conn, error)
+	ListenPacketWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (PacketConn, error)
 
 	// Unwrap extracts the proxy from a proxy-group. It returns nil when nothing to extract.
 	Unwrap(metadata *Metadata, touch bool) Proxy
@@ -215,4 +227,24 @@ type UDPPacketInAddr interface {
 type PacketAdapter interface {
 	UDPPacket
 	Metadata() *Metadata
+}
+
+type NatTable interface {
+	Set(key string, e PacketConn)
+
+	Get(key string) PacketConn
+
+	GetOrCreateLock(key string) (*sync.Cond, bool)
+
+	Delete(key string)
+
+	GetLocalConn(lAddr, rAddr string) *net.UDPConn
+
+	AddLocalConn(lAddr, rAddr string, conn *net.UDPConn) bool
+
+	RangeLocalConn(lAddr string, f func(key, value any) bool)
+
+	GetOrCreateLockForLocalConn(lAddr, key string) (*sync.Cond, bool)
+
+	DeleteLocalConnMap(lAddr, key string)
 }

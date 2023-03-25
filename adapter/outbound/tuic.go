@@ -42,21 +42,27 @@ type TuicOption struct {
 	DisableSni            bool     `proxy:"disable-sni,omitempty"`
 	MaxUdpRelayPacketSize int      `proxy:"max-udp-relay-packet-size,omitempty"`
 
-	FastOpen            bool   `proxy:"fast-open,omitempty"`
-	MaxOpenStreams      int    `proxy:"max-open-streams,omitempty"`
-	SkipCertVerify      bool   `proxy:"skip-cert-verify,omitempty"`
-	Fingerprint         string `proxy:"fingerprint,omitempty"`
-	CustomCA            string `proxy:"ca,omitempty"`
-	CustomCAString      string `proxy:"ca-str,omitempty"`
-	ReceiveWindowConn   int    `proxy:"recv-window-conn,omitempty"`
-	ReceiveWindow       int    `proxy:"recv-window,omitempty"`
-	DisableMTUDiscovery bool   `proxy:"disable-mtu-discovery,omitempty"`
+	FastOpen             bool   `proxy:"fast-open,omitempty"`
+	MaxOpenStreams       int    `proxy:"max-open-streams,omitempty"`
+	SkipCertVerify       bool   `proxy:"skip-cert-verify,omitempty"`
+	Fingerprint          string `proxy:"fingerprint,omitempty"`
+	CustomCA             string `proxy:"ca,omitempty"`
+	CustomCAString       string `proxy:"ca-str,omitempty"`
+	ReceiveWindowConn    int    `proxy:"recv-window-conn,omitempty"`
+	ReceiveWindow        int    `proxy:"recv-window,omitempty"`
+	DisableMTUDiscovery  bool   `proxy:"disable-mtu-discovery,omitempty"`
+	MaxDatagramFrameSize int    `proxy:"max-datagram-frame-size,omitempty"`
+	SNI                  string `proxy:"sni,omitempty"`
 }
 
 // DialContext implements C.ProxyAdapter
 func (t *Tuic) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.Conn, error) {
-	opts = t.Base.DialOptions(opts...)
-	conn, err := t.client.DialContext(ctx, metadata, t.dial, opts...)
+	return t.DialContextWithDialer(ctx, dialer.NewDialer(t.Base.DialOptions(opts...)...), metadata)
+}
+
+// DialContextWithDialer implements C.ProxyAdapter
+func (t *Tuic) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (C.Conn, error) {
+	conn, err := t.client.DialContextWithDialer(ctx, metadata, dialer, t.dialWithDialer)
 	if err != nil {
 		return nil, err
 	}
@@ -65,21 +71,34 @@ func (t *Tuic) DialContext(ctx context.Context, metadata *C.Metadata, opts ...di
 
 // ListenPacketContext implements C.ProxyAdapter
 func (t *Tuic) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (_ C.PacketConn, err error) {
-	opts = t.Base.DialOptions(opts...)
-	pc, err := t.client.ListenPacketContext(ctx, metadata, t.dial, opts...)
+	return t.ListenPacketWithDialer(ctx, dialer.NewDialer(t.Base.DialOptions(opts...)...), metadata)
+}
+
+// ListenPacketWithDialer implements C.ProxyAdapter
+func (t *Tuic) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	pc, err := t.client.ListenPacketWithDialer(ctx, metadata, dialer, t.dialWithDialer)
 	if err != nil {
 		return nil, err
 	}
 	return newPacketConn(pc, t), nil
 }
 
+// SupportWithDialer implements C.ProxyAdapter
+func (t *Tuic) SupportWithDialer() bool {
+	return true
+}
+
 func (t *Tuic) dial(ctx context.Context, opts ...dialer.Option) (pc net.PacketConn, addr net.Addr, err error) {
+	return t.dialWithDialer(ctx, dialer.NewDialer(opts...))
+}
+
+func (t *Tuic) dialWithDialer(ctx context.Context, dialer C.Dialer) (pc net.PacketConn, addr net.Addr, err error) {
 	udpAddr, err := resolveUDPAddrWithPrefer(ctx, "udp", t.addr, t.prefer)
 	if err != nil {
 		return nil, nil, err
 	}
 	addr = udpAddr
-	pc, err = dialer.ListenPacket(ctx, dialer.ParseNetwork("udp", udpAddr.AddrPort().Addr()), "", opts...)
+	pc, err = dialer.ListenPacket(ctx, "udp", "", udpAddr.AddrPort())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -89,11 +108,13 @@ func (t *Tuic) dial(ctx context.Context, opts ...dialer.Option) (pc net.PacketCo
 func NewTuic(option TuicOption) (*Tuic, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 	serverName := option.Server
-
 	tlsConfig := &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: option.SkipCertVerify,
 		MinVersion:         tls.VersionTLS13,
+	}
+	if option.SNI != "" {
+		tlsConfig.ServerName = option.SNI
 	}
 
 	var bs []byte
@@ -126,7 +147,7 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 			return nil, err
 		}
 	} else {
-		tlsConfig = tlsC.GetGlobalFingerprintTLCConfig(tlsConfig)
+		tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
 	}
 
 	if len(option.ALPN) > 0 {
@@ -148,12 +169,21 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 	}
 
 	if option.MaxUdpRelayPacketSize == 0 {
-		option.MaxUdpRelayPacketSize = 1500
+		option.MaxUdpRelayPacketSize = 1252
 	}
 
 	if option.MaxOpenStreams == 0 {
 		option.MaxOpenStreams = 100
 	}
+
+	if option.MaxDatagramFrameSize == 0 {
+		option.MaxDatagramFrameSize = option.MaxUdpRelayPacketSize + tuic.PacketOverHead
+	}
+
+	if option.MaxDatagramFrameSize > 1400 {
+		option.MaxDatagramFrameSize = 1400
+	}
+	option.MaxUdpRelayPacketSize = option.MaxDatagramFrameSize - tuic.PacketOverHead
 
 	// ensure server's incoming stream can handle correctly, increase to 1.1x
 	quicMaxOpenStreams := int64(option.MaxOpenStreams)
@@ -167,6 +197,7 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 		MaxIncomingUniStreams:          quicMaxOpenStreams,
 		KeepAlivePeriod:                time.Duration(option.HeartbeatInterval) * time.Millisecond,
 		DisablePathMTUDiscovery:        option.DisableMTUDiscovery,
+		MaxDatagramFrameSize:           int64(option.MaxDatagramFrameSize),
 		EnableDatagrams:                true,
 	}
 	if option.ReceiveWindowConn == 0 {
@@ -196,12 +227,18 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 			udp:    true,
 			tfo:    option.FastOpen,
 			iface:  option.Interface,
+			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),
 		},
 	}
-	// to avoid tuic's "too many open streams", decrease to 0.9x
+
 	clientMaxOpenStreams := int64(option.MaxOpenStreams)
-	clientMaxOpenStreams = clientMaxOpenStreams - int64(math.Ceil(float64(clientMaxOpenStreams)/10.0))
+
+	// to avoid tuic's "too many open streams", decrease to 0.9x
+	if clientMaxOpenStreams == 100 {
+		clientMaxOpenStreams = clientMaxOpenStreams - int64(math.Ceil(float64(clientMaxOpenStreams)/10.0))
+	}
+
 	if clientMaxOpenStreams < 1 {
 		clientMaxOpenStreams = 1
 	}

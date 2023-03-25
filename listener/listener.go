@@ -207,7 +207,7 @@ func ReCreateSocks(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAd
 	log.Infoln("SOCKS proxy listening at: %s", socksListener.Address())
 }
 
-func ReCreateRedir(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter) {
+func ReCreateRedir(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, natTable C.NatTable) {
 	redirMux.Lock()
 	defer redirMux.Unlock()
 
@@ -245,7 +245,7 @@ func ReCreateRedir(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAd
 		return
 	}
 
-	redirUDPListener, err = tproxy.NewUDP(addr, udpIn)
+	redirUDPListener, err = tproxy.NewUDP(addr, udpIn, natTable)
 	if err != nil {
 		log.Warnln("Failed to start Redir UDP Listener: %s", err)
 	}
@@ -271,6 +271,7 @@ func ReCreateShadowSocks(shadowSocksConfig string, tcpIn chan<- C.ConnContext, u
 			Listen:   addr,
 			Password: password,
 			Cipher:   cipher,
+			Udp:      true,
 		}
 	}
 
@@ -403,7 +404,7 @@ func ReCreateTuic(config LC.TuicServer, tcpIn chan<- C.ConnContext, udpIn chan<-
 	return
 }
 
-func ReCreateTProxy(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter) {
+func ReCreateTProxy(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, natTable C.NatTable) {
 	tproxyMux.Lock()
 	defer tproxyMux.Unlock()
 
@@ -441,7 +442,7 @@ func ReCreateTProxy(port int, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketA
 		return
 	}
 
-	tproxyUDPListener, err = tproxy.NewUDP(addr, udpIn)
+	tproxyUDPListener, err = tproxy.NewUDP(addr, udpIn, natTable)
 	if err != nil {
 		log.Warnln("Failed to start TProxy UDP Listener: %s", err)
 	}
@@ -719,7 +720,7 @@ func PatchTunnel(tunnels []LC.Tunnel, tcpIn chan<- C.ConnContext, udpIn chan<- C
 	}
 }
 
-func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, dropOld bool) {
+func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, natTable C.NatTable, dropOld bool) {
 	inboundMux.Lock()
 	defer inboundMux.Unlock()
 
@@ -731,7 +732,7 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tcpIn ch
 				continue
 			}
 		}
-		if err := newListener.Listen(tcpIn, udpIn); err != nil {
+		if err := newListener.Listen(tcpIn, udpIn, natTable); err != nil {
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
 			continue
 		}
@@ -821,7 +822,8 @@ func hasTunConfigChange(tunConf *LC.Tun) bool {
 		LastTunConf.MTU != tunConf.MTU ||
 		LastTunConf.StrictRoute != tunConf.StrictRoute ||
 		LastTunConf.EndpointIndependentNat != tunConf.EndpointIndependentNat ||
-		LastTunConf.UDPTimeout != tunConf.UDPTimeout {
+		LastTunConf.UDPTimeout != tunConf.UDPTimeout ||
+		LastTunConf.FileDescriptor != tunConf.FileDescriptor {
 		return true
 	}
 

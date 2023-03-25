@@ -33,6 +33,7 @@ type TunOption struct {
 	ExcludePackage         []string `inbound:"exclude_package,omitempty"`
 	EndpointIndependentNat bool     `inbound:"endpoint_independent_nat,omitempty"`
 	UDPTimeout             int64    `inbound:"udp_timeout,omitempty"`
+	FileDescriptor         int      `inbound:"file-descriptor,omitempty"`
 }
 
 func (o TunOption) Equal(config C.InboundConfig) bool {
@@ -96,6 +97,7 @@ func NewTun(options *TunOption) (*Tun, error) {
 			ExcludePackage:         options.ExcludePackage,
 			EndpointIndependentNat: options.EndpointIndependentNat,
 			UDPTimeout:             options.UDPTimeout,
+			FileDescriptor:         options.FileDescriptor,
 		},
 	}, nil
 }
@@ -111,7 +113,7 @@ func (t *Tun) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (t *Tun) Listen(tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter) error {
+func (t *Tun) Listen(tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, natTable C.NatTable) error {
 	var err error
 	t.l, err = sing_tun.New(t.tun, tcpIn, udpIn, t.Additions()...)
 	if err != nil {

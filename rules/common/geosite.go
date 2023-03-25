@@ -9,7 +9,6 @@ import (
 	_ "github.com/Dreamacro/clash/component/geodata/standard"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/log"
-	"github.com/Dreamacro/clash/transport/socks5"
 )
 
 type GEOSITE struct {
@@ -25,11 +24,10 @@ func (gs *GEOSITE) RuleType() C.RuleType {
 }
 
 func (gs *GEOSITE) Match(metadata *C.Metadata) (bool, string) {
-	if metadata.AddrType() != socks5.AtypDomainName {
+	domain := metadata.RuleHost()
+	if len(domain) == 0 {
 		return false, ""
 	}
-
-	domain := metadata.Host
 	return gs.matcher.ApplyDomain(domain), gs.adapter
 }
 
@@ -50,12 +48,9 @@ func (gs *GEOSITE) GetRecodeSize() int {
 }
 
 func NewGEOSITE(country string, adapter string) (*GEOSITE, error) {
-	if !initFlag {
-		if err := geodata.InitGeoSite(); err != nil {
-			log.Errorln("can't initial GeoSite: %s", err)
-			return nil, err
-		}
-		initFlag = true
+	if err := geodata.InitGeoSite(); err != nil {
+		log.Errorln("can't initial GeoSite: %s", err)
+		return nil, err
 	}
 
 	matcher, size, err := geodata.LoadGeoSiteMatcher(country)
@@ -76,4 +71,4 @@ func NewGEOSITE(country string, adapter string) (*GEOSITE, error) {
 	return geoSite, nil
 }
 
-//var _ C.Rule = (*GEOSITE)(nil)
+var _ C.Rule = (*GEOSITE)(nil)

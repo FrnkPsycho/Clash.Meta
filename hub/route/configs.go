@@ -80,6 +80,7 @@ type tunSchema struct {
 	ExcludePackage         *[]string          `yaml:"exclude-package" json:"exclude-package,omitempty"`
 	EndpointIndependentNat *bool              `yaml:"endpoint-independent-nat" json:"endpoint-independent-nat,omitempty"`
 	UDPTimeout             *int64             `yaml:"udp-timeout" json:"udp-timeout,omitempty"`
+	FileDescriptor         *int               `yaml:"file-descriptor" json:"file-descriptor"`
 }
 
 type tuicServerSchema struct {
@@ -104,7 +105,6 @@ func pointerOrDefault(p *int, def int) int {
 	if p != nil {
 		return *p
 	}
-
 	return def
 }
 
@@ -170,6 +170,9 @@ func pointerOrDefaultTun(p *tunSchema, def LC.Tun) LC.Tun {
 		if p.UDPTimeout != nil {
 			def.UDPTimeout = *p.UDPTimeout
 		}
+		if p.FileDescriptor != nil {
+			def.FileDescriptor = *p.FileDescriptor
+		}
 	}
 	return def
 }
@@ -210,7 +213,7 @@ func pointerOrDefaultTuicServer(p *tuicServerSchema, def LC.TuicServer) LC.TuicS
 
 func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	general := &configSchema{}
-	if err := render.DecodeJSON(r.Body, general); err != nil {
+	if err := render.DecodeJSON(r.Body, &general); err != nil {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, ErrBadRequest)
 		return
@@ -229,7 +232,7 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if general.TcpConcurrent != nil {
-		dialer.SetDial(*general.TcpConcurrent)
+		dialer.SetTcpConcurrent(*general.TcpConcurrent)
 	}
 
 	if general.InterfaceName != nil {
@@ -240,11 +243,12 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 
 	tcpIn := tunnel.TCPIn()
 	udpIn := tunnel.UDPIn()
+	natTable := tunnel.NatTable()
 
 	P.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port), tcpIn)
 	P.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort), tcpIn, udpIn)
-	P.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tcpIn, udpIn)
-	P.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tcpIn, udpIn)
+	P.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tcpIn, udpIn, natTable)
+	P.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tcpIn, udpIn, natTable)
 	P.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tcpIn, udpIn)
 	P.ReCreateTun(pointerOrDefaultTun(general.Tun, P.LastTunConf), tcpIn, udpIn)
 	P.ReCreateShadowSocks(pointerOrDefaultString(general.ShadowSocksConfig, ports.ShadowSocksConfig), tcpIn, udpIn)
@@ -266,13 +270,11 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	render.NoContent(w, r)
 }
 
-type updateConfigRequest struct {
-	Path    string `json:"path"`
-	Payload string `json:"payload"`
-}
-
 func updateConfigs(w http.ResponseWriter, r *http.Request) {
-	req := updateConfigRequest{}
+	req := struct {
+		Path    string `json:"path"`
+		Payload string `json:"payload"`
+	}{}
 	if err := render.DecodeJSON(r.Body, &req); err != nil {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, ErrBadRequest)

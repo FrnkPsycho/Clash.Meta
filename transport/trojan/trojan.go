@@ -8,13 +8,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	tlsC "github.com/Dreamacro/clash/component/tls"
 	"io"
 	"net"
 	"net/http"
 	"sync"
 
 	"github.com/Dreamacro/clash/common/pool"
+	tlsC "github.com/Dreamacro/clash/component/tls"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/socks5"
 	"github.com/Dreamacro/clash/transport/vless"
@@ -47,13 +47,15 @@ const (
 )
 
 type Option struct {
-	Password       string
-	ALPN           []string
-	ServerName     string
-	SkipCertVerify bool
-	Fingerprint    string
-	Flow           string
-	FlowShow       bool
+	Password          string
+	ALPN              []string
+	ServerName        string
+	SkipCertVerify    bool
+	Fingerprint       string
+	Flow              string
+	FlowShow          bool
+	ClientFingerprint string
+	Reality           *tlsC.RealityConfig
 }
 
 type WebsocketOption struct {
@@ -83,7 +85,7 @@ func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
 		}
 
 		if len(t.option.Fingerprint) == 0 {
-			xtlsConfig = tlsC.GetGlobalFingerprintXTLCConfig(xtlsConfig)
+			xtlsConfig = tlsC.GetGlobalXTLSConfig(xtlsConfig)
 		} else {
 			var err error
 			if xtlsConfig, err = tlsC.GetSpecifiedFingerprintXTLSConfig(xtlsConfig, t.option.Fingerprint); err != nil {
@@ -108,7 +110,7 @@ func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
 		}
 
 		if len(t.option.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalFingerprintTLCConfig(tlsConfig)
+			tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
 		} else {
 			var err error
 			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(tlsConfig, t.option.Fingerprint); err != nil {
@@ -116,18 +118,34 @@ func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
 			}
 		}
 
-		tlsConn := tls.Client(conn, tlsConfig)
-		if err := tlsConn.Handshake(); err != nil {
-			return nil, err
+		if len(t.option.ClientFingerprint) != 0 {
+			if t.option.Reality == nil {
+				utlsConn, valid := vmess.GetUTLSConn(conn, t.option.ClientFingerprint, tlsConfig)
+				if valid {
+					ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
+					defer cancel()
+
+					err := utlsConn.(*tlsC.UConn).HandshakeContext(ctx)
+					return utlsConn, err
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
+				defer cancel()
+				return tlsC.GetRealityConn(ctx, conn, t.option.ClientFingerprint, tlsConfig, t.option.Reality)
+			}
 		}
+		if t.option.Reality != nil {
+			return nil, errors.New("REALITY is based on uTLS, please set a client-fingerprint")
+		}
+
+		tlsConn := tls.Client(conn, tlsConfig)
+
 		// fix tls handshake not timeout
 		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
 		defer cancel()
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, err
-		}
 
-		return tlsConn, nil
+		err := tlsConn.HandshakeContext(ctx)
+		return tlsConn, err
 	}
 }
 
@@ -145,12 +163,13 @@ func (t *Trojan) StreamWebsocketConn(conn net.Conn, wsOptions *WebsocketOption) 
 	}
 
 	return vmess.StreamWebsocketConn(conn, &vmess.WebsocketConfig{
-		Host:      wsOptions.Host,
-		Port:      wsOptions.Port,
-		Path:      wsOptions.Path,
-		Headers:   wsOptions.Headers,
-		TLS:       true,
-		TLSConfig: tlsConfig,
+		Host:              wsOptions.Host,
+		Port:              wsOptions.Port,
+		Path:              wsOptions.Path,
+		Headers:           wsOptions.Headers,
+		TLS:               true,
+		TLSConfig:         tlsConfig,
+		ClientFingerprint: t.option.ClientFingerprint,
 	})
 }
 

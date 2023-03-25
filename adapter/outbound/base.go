@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/gofrs/uuid"
 	"net"
 	"strings"
 
+	N "github.com/Dreamacro/clash/common/net"
+	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/component/dialer"
 	C "github.com/Dreamacro/clash/constant"
 )
@@ -18,6 +19,7 @@ type Base struct {
 	iface  string
 	tp     C.AdapterType
 	udp    bool
+	xudp   bool
 	tfo    bool
 	rmark  int
 	id     string
@@ -32,12 +34,7 @@ func (b *Base) Name() string {
 // Id implements C.ProxyAdapter
 func (b *Base) Id() string {
 	if b.id == "" {
-		id, err := uuid.NewV6()
-		if err != nil {
-			b.id = b.name
-		} else {
-			b.id = id.String()
-		}
+		b.id = utils.NewUUIDV6().String()
 	}
 
 	return b.id
@@ -57,14 +54,24 @@ func (b *Base) DialContext(ctx context.Context, metadata *C.Metadata, opts ...di
 	return nil, errors.New("no support")
 }
 
+// DialContextWithDialer implements C.ProxyAdapter
+func (b *Base) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.Conn, err error) {
+	return nil, errors.New("no support")
+}
+
 // ListenPacketContext implements C.ProxyAdapter
 func (b *Base) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
 	return nil, errors.New("no support")
 }
 
-// ListenPacketOnStreamConn implements C.ProxyAdapter
-func (b *Base) ListenPacketOnStreamConn(c net.Conn, metadata *C.Metadata) (_ C.PacketConn, err error) {
+// ListenPacketWithDialer implements C.ProxyAdapter
+func (b *Base) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	return nil, errors.New("no support")
+}
+
+// SupportWithDialer implements C.ProxyAdapter
+func (b *Base) SupportWithDialer() bool {
+	return false
 }
 
 // SupportUOT implements C.ProxyAdapter
@@ -75,6 +82,11 @@ func (b *Base) SupportUOT() bool {
 // SupportUDP implements C.ProxyAdapter
 func (b *Base) SupportUDP() bool {
 	return b.udp
+}
+
+// SupportXUDP implements C.ProxyAdapter
+func (b *Base) SupportXUDP() bool {
+	return b.xudp
 }
 
 // SupportTFO implements C.ProxyAdapter
@@ -122,10 +134,15 @@ func (b *Base) DialOptions(opts ...dialer.Option) []dialer.Option {
 	default:
 	}
 
+	if b.tfo {
+		opts = append(opts, dialer.WithTFO(true))
+	}
+
 	return opts
 }
 
 type BasicOption struct {
+	TFO         bool   `proxy:"tfo,omitempty" group:"tfo,omitempty"`
 	Interface   string `proxy:"interface-name,omitempty" group:"interface-name,omitempty"`
 	RoutingMark int    `proxy:"routing-mark,omitempty" group:"routing-mark,omitempty"`
 	IPVersion   string `proxy:"ip-version,omitempty" group:"ip-version,omitempty"`
@@ -136,6 +153,7 @@ type BaseOption struct {
 	Addr        string
 	Type        C.AdapterType
 	UDP         bool
+	XUDP        bool
 	TFO         bool
 	Interface   string
 	RoutingMark int
@@ -148,6 +166,7 @@ func NewBase(opt BaseOption) *Base {
 		addr:   opt.Addr,
 		tp:     opt.Type,
 		udp:    opt.UDP,
+		xudp:   opt.XUDP,
 		tfo:    opt.TFO,
 		iface:  opt.Interface,
 		rmark:  opt.RoutingMark,
@@ -156,7 +175,7 @@ func NewBase(opt BaseOption) *Base {
 }
 
 type conn struct {
-	net.Conn
+	N.ExtendedConn
 	chain                   C.Chain
 	actualRemoteDestination string
 }
@@ -175,13 +194,19 @@ func (c *conn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
+func (c *conn) Upstream() any {
+	return c.ExtendedConn
+}
+
 func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
-	return &conn{c, []string{a.Name()}, parseRemoteDestination(a.Addr())}
+	return &conn{N.NewExtendedConn(c), []string{a.Name()}, parseRemoteDestination(a.Addr())}
 }
 
 type packetConn struct {
 	net.PacketConn
 	chain                   C.Chain
+	adapterName             string
+	connID                  string
 	actualRemoteDestination string
 }
 
@@ -199,8 +224,13 @@ func (c *packetConn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
+func (c *packetConn) LocalAddr() net.Addr {
+	lAddr := c.PacketConn.LocalAddr()
+	return N.NewCustomAddr(c.adapterName, c.connID, lAddr) // make quic-go's connMultiplexer happy
+}
+
 func newPacketConn(pc net.PacketConn, a C.ProxyAdapter) C.PacketConn {
-	return &packetConn{pc, []string{a.Name()}, parseRemoteDestination(a.Addr())}
+	return &packetConn{pc, []string{a.Name()}, a.Name(), utils.NewUUIDV4().String(), parseRemoteDestination(a.Addr())}
 }
 
 func parseRemoteDestination(addr string) string {

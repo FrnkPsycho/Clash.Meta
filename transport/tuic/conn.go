@@ -1,7 +1,6 @@
 package tuic
 
 import (
-	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -26,7 +25,7 @@ func SetCongestionController(quicConn quic.Connection, cc string) {
 		quicConn.SetCongestionControl(
 			congestion.NewCubicSender(
 				congestion.DefaultClock{},
-				congestion.GetMaxPacketSize(quicConn.RemoteAddr()),
+				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
 				false,
 				nil,
 			),
@@ -35,7 +34,7 @@ func SetCongestionController(quicConn quic.Connection, cc string) {
 		quicConn.SetCongestionControl(
 			congestion.NewCubicSender(
 				congestion.DefaultClock{},
-				congestion.GetMaxPacketSize(quicConn.RemoteAddr()),
+				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
 				true,
 				nil,
 			),
@@ -44,9 +43,9 @@ func SetCongestionController(quicConn quic.Connection, cc string) {
 		quicConn.SetCongestionControl(
 			congestion.NewBBRSender(
 				congestion.DefaultClock{},
-				congestion.GetMaxPacketSize(quicConn.RemoteAddr()),
-				congestion.InitialCongestionWindow,
-				congestion.DefaultBBRMaxCongestionWindow,
+				congestion.GetInitialPacketSize(quicConn.RemoteAddr()),
+				congestion.InitialCongestionWindow*congestion.InitialMaxDatagramSize,
+				congestion.DefaultBBRMaxCongestionWindow*congestion.InitialMaxDatagramSize,
 			),
 		)
 	}
@@ -109,7 +108,6 @@ var _ net.Conn = &quicStreamConn{}
 type quicStreamPacketConn struct {
 	connId    uint32
 	quicConn  quic.Connection
-	lAddr     net.Addr
 	inputConn *N.BufferedConn
 
 	udpRelayMode          string
@@ -201,8 +199,8 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 }
 
 func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	if len(p) > q.maxUdpRelayPacketSize {
-		return 0, fmt.Errorf("udp packet too large(%d > %d)", len(p), q.maxUdpRelayPacketSize)
+	if q.udpRelayMode != "quic" && len(p) > q.maxUdpRelayPacketSize {
+		return 0, quic.ErrMessageTooLarge(q.maxUdpRelayPacketSize)
 	}
 	if q.closed {
 		return 0, net.ErrClosed
@@ -216,7 +214,6 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
-	addr.String()
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	addrPort, err := netip.ParseAddrPort(addr.String())
@@ -240,7 +237,8 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 			return
 		}
 	default: // native
-		err = q.quicConn.SendMessage(buf.Bytes())
+		data := buf.Bytes()
+		err = q.quicConn.SendMessage(data)
 		if err != nil {
 			return
 		}
@@ -251,7 +249,7 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 }
 
 func (q *quicStreamPacketConn) LocalAddr() net.Addr {
-	return q.lAddr
+	return q.quicConn.LocalAddr()
 }
 
 var _ net.PacketConn = &quicStreamPacketConn{}

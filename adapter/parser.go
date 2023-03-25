@@ -2,6 +2,9 @@ package adapter
 
 import (
 	"fmt"
+
+	tlsC "github.com/Dreamacro/clash/component/tls"
+
 	"github.com/Dreamacro/clash/adapter/outbound"
 	"github.com/Dreamacro/clash/common/structure"
 	C "github.com/Dreamacro/clash/constant"
@@ -20,7 +23,7 @@ func ParseProxy(mapping map[string]any) (C.Proxy, error) {
 	)
 	switch proxyType {
 	case "ss":
-		ssOption := &outbound.ShadowSocksOption{}
+		ssOption := &outbound.ShadowSocksOption{ClientFingerprint: tlsC.GetGlobalFingerprint()}
 		err = decoder.Decode(mapping, ssOption)
 		if err != nil {
 			break
@@ -53,14 +56,16 @@ func ParseProxy(mapping map[string]any) (C.Proxy, error) {
 				Method: "GET",
 				Path:   []string{"/"},
 			},
+			ClientFingerprint: tlsC.GetGlobalFingerprint(),
 		}
+
 		err = decoder.Decode(mapping, vmessOption)
 		if err != nil {
 			break
 		}
 		proxy, err = outbound.NewVmess(*vmessOption)
 	case "vless":
-		vlessOption := &outbound.VlessOption{}
+		vlessOption := &outbound.VlessOption{ClientFingerprint: tlsC.GetGlobalFingerprint()}
 		err = decoder.Decode(mapping, vlessOption)
 		if err != nil {
 			break
@@ -74,7 +79,7 @@ func ParseProxy(mapping map[string]any) (C.Proxy, error) {
 		}
 		proxy, err = outbound.NewSnell(*snellOption)
 	case "trojan":
-		trojanOption := &outbound.TrojanOption{}
+		trojanOption := &outbound.TrojanOption{ClientFingerprint: tlsC.GetGlobalFingerprint()}
 		err = decoder.Decode(mapping, trojanOption)
 		if err != nil {
 			break

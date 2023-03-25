@@ -27,9 +27,7 @@
             pname = "clash-meta";
             inherit version;
             src = ./.;
-
             vendorSha256 = "sha256-D6b0U04wwDUzeIu3//E10YehohTzvyHWtK5Yzf3xrAI=";
-
             # Do not build testing suit
             excludedPackages = [ "./test" ];
 

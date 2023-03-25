@@ -11,6 +11,7 @@ type ShadowSocksOption struct {
 	BaseOption
 	Password string `inbound:"password"`
 	Cipher   string `inbound:"cipher"`
+	UDP      bool   `inbound:"udp,omitempty"`
 }
 
 func (o ShadowSocksOption) Equal(config C.InboundConfig) bool {
@@ -37,6 +38,7 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 			Listen:   base.RawAddress(),
 			Password: options.Password,
 			Cipher:   options.Cipher,
+			Udp:      options.UDP,
 		},
 	}, nil
 }
@@ -57,7 +59,7 @@ func (s *ShadowSocks) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (s *ShadowSocks) Listen(tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter) error {
+func (s *ShadowSocks) Listen(tcpIn chan<- C.ConnContext, udpIn chan<- C.PacketAdapter, natTable C.NatTable) error {
 	var err error
 	s.l, err = sing_shadowsocks.New(s.ss, tcpIn, udpIn, s.Additions()...)
 	if err != nil {

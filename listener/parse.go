@@ -73,7 +73,7 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 		}
 		listener, err = IN.NewTun(tunOption)
 	case "shadowsocks":
-		shadowsocksOption := &IN.ShadowSocksOption{}
+		shadowsocksOption := &IN.ShadowSocksOption{UDP: true}
 		err = decoder.Decode(mapping, shadowsocksOption)
 		if err != nil {
 			return nil, err
@@ -92,6 +92,7 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			AuthenticationTimeout: 1000,
 			ALPN:                  []string{"h3"},
 			MaxUdpRelayPacketSize: 1500,
+			CongestionController:  "bbr",
 		}
 		err = decoder.Decode(mapping, tuicOption)
 		if err != nil {

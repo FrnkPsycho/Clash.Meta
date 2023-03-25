@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/atomic"
-	"math/rand"
 	"net/netip"
+	"strings"
 	"time"
+
+	"go.uber.org/atomic"
 
 	"github.com/Dreamacro/clash/common/cache"
 	"github.com/Dreamacro/clash/component/fakeip"
@@ -15,14 +16,17 @@ import (
 	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/component/trie"
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/log"
 
 	D "github.com/miekg/dns"
+	"github.com/zhangyunhao116/fastrand"
 	"golang.org/x/sync/singleflight"
 )
 
 type dnsClient interface {
 	Exchange(m *D.Msg) (msg *D.Msg, err error)
 	ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error)
+	Address() string
 }
 
 type result struct {
@@ -30,9 +34,16 @@ type result struct {
 	Error error
 }
 
+type geositePolicyRecord struct {
+	matcher          fallbackDomainFilter
+	policy           *Policy
+	inversedMatching bool
+}
+
 type Resolver struct {
 	ipv6                  bool
-	hosts                 *trie.DomainTrie[netip.Addr]
+	ipv6Timeout           time.Duration
+	hosts                 *trie.DomainTrie[resolver.HostValue]
 	main                  []dnsClient
 	fallback              []dnsClient
 	fallbackDomainFilters []fallbackDomainFilter
@@ -40,6 +51,7 @@ type Resolver struct {
 	group                 singleflight.Group
 	lruCache              *cache.LruCache[string, *D.Msg]
 	policy                *trie.DomainTrie[*Policy]
+	geositePolicy         []geositePolicyRecord
 	proxyServer           []dnsClient
 }
 
@@ -80,14 +92,20 @@ func (r *Resolver) LookupIP(ctx context.Context, host string) (ips []netip.Addr,
 	}()
 
 	ips, err = r.lookupIP(ctx, host, D.TypeA)
-
+	var waitIPv6 *time.Timer
+	if r != nil {
+		waitIPv6 = time.NewTimer(r.ipv6Timeout)
+	} else {
+		waitIPv6 = time.NewTimer(100 * time.Millisecond)
+	}
+	defer waitIPv6.Stop()
 	select {
 	case ipv6s, open := <-ch:
 		if !open && err != nil {
 			return nil, resolver.ErrIPNotFound
 		}
 		ips = append(ips, ipv6s...)
-	case <-time.After(30 * time.Millisecond):
+	case <-waitIPv6.C:
 		// wait ipv6 result
 	}
 
@@ -102,7 +120,7 @@ func (r *Resolver) ResolveIP(ctx context.Context, host string) (ip netip.Addr, e
 	} else if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: %s", resolver.ErrIPNotFound, host)
 	}
-	return ips[rand.Intn(len(ips))], nil
+	return ips[fastrand.Intn(len(ips))], nil
 }
 
 // LookupIPv4 request with TypeA
@@ -118,7 +136,7 @@ func (r *Resolver) ResolveIPv4(ctx context.Context, host string) (ip netip.Addr,
 	} else if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: %s", resolver.ErrIPNotFound, host)
 	}
-	return ips[rand.Intn(len(ips))], nil
+	return ips[fastrand.Intn(len(ips))], nil
 }
 
 // LookupIPv6 request with TypeAAAA
@@ -134,7 +152,7 @@ func (r *Resolver) ResolveIPv6(ctx context.Context, host string) (ip netip.Addr,
 	} else if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: %s", resolver.ErrIPNotFound, host)
 	}
-	return ips[rand.Intn(len(ips))], nil
+	return ips[fastrand.Intn(len(ips))], nil
 }
 
 func (r *Resolver) shouldIPFallback(ip netip.Addr) bool {
@@ -272,12 +290,18 @@ func (r *Resolver) matchPolicy(m *D.Msg) []dnsClient {
 	}
 
 	record := r.policy.Search(domain)
-	if record == nil {
-		return nil
+	if record != nil {
+		p := record.Data()
+		return p.GetData()
 	}
 
-	p := record.Data()
-	return p.GetData()
+	for _, geositeRecord := range r.geositePolicy {
+		matched := geositeRecord.matcher.Match(domain)
+		if matched != geositeRecord.inversedMatching {
+			return geositeRecord.policy.GetData()
+		}
+	}
+	return nil
 }
 
 func (r *Resolver) shouldOnlyQueryFallback(m *D.Msg) bool {
@@ -402,24 +426,27 @@ type Config struct {
 	Default        []NameServer
 	ProxyServer    []NameServer
 	IPv6           bool
+	IPv6Timeout    uint
 	EnhancedMode   C.DNSMode
 	FallbackFilter FallbackFilter
 	Pool           *fakeip.Pool
-	Hosts          *trie.DomainTrie[netip.Addr]
-	Policy         map[string]NameServer
+	Hosts          *trie.DomainTrie[resolver.HostValue]
+	Policy         map[string][]NameServer
 }
 
 func NewResolver(config Config) *Resolver {
 	defaultResolver := &Resolver{
-		main:     transform(config.Default, nil),
-		lruCache: cache.New[string, *D.Msg](cache.WithSize[string, *D.Msg](4096), cache.WithStale[string, *D.Msg](true)),
+		main:        transform(config.Default, nil),
+		lruCache:    cache.New(cache.WithSize[string, *D.Msg](4096), cache.WithStale[string, *D.Msg](true)),
+		ipv6Timeout: time.Duration(config.IPv6Timeout) * time.Millisecond,
 	}
 
 	r := &Resolver{
-		ipv6:     config.IPv6,
-		main:     transform(config.Main, defaultResolver),
-		lruCache: cache.New[string, *D.Msg](cache.WithSize[string, *D.Msg](4096), cache.WithStale[string, *D.Msg](true)),
-		hosts:    config.Hosts,
+		ipv6:        config.IPv6,
+		main:        transform(config.Main, defaultResolver),
+		lruCache:    cache.New(cache.WithSize[string, *D.Msg](4096), cache.WithStale[string, *D.Msg](true)),
+		hosts:       config.Hosts,
+		ipv6Timeout: time.Duration(config.IPv6Timeout) * time.Millisecond,
 	}
 
 	if len(config.Fallback) != 0 {
@@ -433,7 +460,26 @@ func NewResolver(config Config) *Resolver {
 	if len(config.Policy) != 0 {
 		r.policy = trie.New[*Policy]()
 		for domain, nameserver := range config.Policy {
-			_ = r.policy.Insert(domain, NewPolicy(transform([]NameServer{nameserver}, defaultResolver)))
+			if strings.HasPrefix(strings.ToLower(domain), "geosite:") {
+				groupname := domain[8:]
+				inverse := false
+				if strings.HasPrefix(groupname, "!") {
+					inverse = true
+					groupname = groupname[1:]
+				}
+				log.Debugln("adding geosite policy: %s inversed %t", groupname, inverse)
+				matcher, err := NewGeoSite(groupname)
+				if err != nil {
+					continue
+				}
+				r.geositePolicy = append(r.geositePolicy, geositePolicyRecord{
+					matcher:          matcher,
+					policy:           NewPolicy(transform(nameserver, defaultResolver)),
+					inversedMatching: inverse,
+				})
+			} else {
+				_ = r.policy.Insert(domain, NewPolicy(transform(nameserver, defaultResolver)))
+			}
 		}
 		r.policy.Optimize()
 	}
@@ -466,11 +512,12 @@ func NewResolver(config Config) *Resolver {
 
 func NewProxyServerHostResolver(old *Resolver) *Resolver {
 	r := &Resolver{
-		ipv6:     old.ipv6,
-		main:     old.proxyServer,
-		lruCache: old.lruCache,
-		hosts:    old.hosts,
-		policy:   old.policy,
+		ipv6:        old.ipv6,
+		main:        old.proxyServer,
+		lruCache:    old.lruCache,
+		hosts:       old.hosts,
+		policy:      trie.New[*Policy](),
+		ipv6Timeout: old.ipv6Timeout,
 	}
 	return r
 }

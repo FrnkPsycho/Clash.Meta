@@ -2,7 +2,6 @@ package udp
 
 import (
 	"errors"
-	"math/rand"
 	"net"
 	"strconv"
 	"strings"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/Dreamacro/clash/transport/hysteria/obfs"
 	"github.com/Dreamacro/clash/transport/hysteria/utils"
+
+	"github.com/zhangyunhao116/fastrand"
 )
 
 const (
@@ -58,20 +59,24 @@ type udpPacket struct {
 	addr net.Addr
 }
 
-func NewObfsUDPHopClientPacketConn(server string, hopInterval time.Duration, obfs obfs.Obfuscator, dialer utils.PacketDialer) (*ObfsUDPHopClientPacketConn, error) {
-	host, ports, err := parseAddr(server)
+func NewObfsUDPHopClientPacketConn(server string, serverPorts string, hopInterval time.Duration, obfs obfs.Obfuscator, dialer utils.PacketDialer) (net.PacketConn, error) {
+	ports, err := parsePorts(serverPorts)
 	if err != nil {
 		return nil, err
 	}
 	// Resolve the server IP address, then attach the ports to UDP addresses
-	ip, err := dialer.RemoteAddr(host)
+	rAddr, err := dialer.RemoteAddr(server)
+	if err != nil {
+		return nil, err
+	}
+	ip, _, err := net.SplitHostPort(rAddr.String())
 	if err != nil {
 		return nil, err
 	}
 	serverAddrs := make([]net.Addr, len(ports))
 	for i, port := range ports {
 		serverAddrs[i] = &net.UDPAddr{
-			IP:   net.ParseIP(ip.String()),
+			IP:   net.ParseIP(ip),
 			Port: int(port),
 		}
 	}
@@ -81,7 +86,7 @@ func NewObfsUDPHopClientPacketConn(server string, hopInterval time.Duration, obf
 		serverAddrs: serverAddrs,
 		hopInterval: hopInterval,
 		obfs:        obfs,
-		addrIndex:   rand.Intn(len(serverAddrs)),
+		addrIndex:   fastrand.Intn(len(serverAddrs)),
 		recvQueue:   make(chan *udpPacket, packetQueueSize),
 		closeChan:   make(chan struct{}),
 		bufPool: sync.Pool{
@@ -90,7 +95,7 @@ func NewObfsUDPHopClientPacketConn(server string, hopInterval time.Duration, obf
 			},
 		},
 	}
-	curConn, err := dialer.ListenPacket(ip)
+	curConn, err := dialer.ListenPacket(rAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +105,10 @@ func NewObfsUDPHopClientPacketConn(server string, hopInterval time.Duration, obf
 		conn.currentConn = curConn
 	}
 	go conn.recvRoutine(conn.currentConn)
-	go conn.hopRoutine(dialer, ip)
+	go conn.hopRoutine(dialer, rAddr)
+	if _, ok := conn.currentConn.(syscall.Conn); ok {
+		return &ObfsUDPHopClientPacketConnWithSyscall{conn}, nil
+	}
 	return conn, nil
 }
 
@@ -169,7 +177,7 @@ func (c *ObfsUDPHopClientPacketConn) hop(dialer utils.PacketDialer, rAddr net.Ad
 		_ = trySetPacketConnWriteBuffer(c.currentConn, c.writeBufferSize)
 	}
 	go c.recvRoutine(c.currentConn)
-	c.addrIndex = rand.Intn(len(c.serverAddrs))
+	c.addrIndex = fastrand.Intn(len(c.serverAddrs))
 }
 
 func (c *ObfsUDPHopClientPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -205,6 +213,9 @@ func (c *ObfsUDPHopClientPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 func (c *ObfsUDPHopClientPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	c.connMutex.RLock()
 	defer c.connMutex.RUnlock()
+	if c.closed {
+		return 0, net.ErrClosed
+	}
 	/*
 		// Check if the address is the server address
 		if addr.String() != c.serverAddr.String() {
@@ -230,6 +241,7 @@ func (c *ObfsUDPHopClientPacketConn) Close() error {
 	err := c.currentConn.Close()
 	close(c.closeChan)
 	c.closed = true
+	c.serverAddrs = nil // For GC
 	return err
 }
 
@@ -277,16 +289,6 @@ func (c *ObfsUDPHopClientPacketConn) SetWriteBuffer(bytes int) error {
 	return trySetPacketConnWriteBuffer(c.currentConn, bytes)
 }
 
-func (c *ObfsUDPHopClientPacketConn) SyscallConn() (syscall.RawConn, error) {
-	c.connMutex.RLock()
-	defer c.connMutex.RUnlock()
-	sc, ok := c.currentConn.(syscall.Conn)
-	if !ok {
-		return nil, errors.New("not supported")
-	}
-	return sc.SyscallConn()
-}
-
 func trySetPacketConnReadBuffer(pc net.PacketConn, bytes int) error {
 	sc, ok := pc.(interface {
 		SetReadBuffer(bytes int) error
@@ -307,29 +309,39 @@ func trySetPacketConnWriteBuffer(pc net.PacketConn, bytes int) error {
 	return nil
 }
 
-// parseAddr parses the multi-port server address and returns the host and ports.
+type ObfsUDPHopClientPacketConnWithSyscall struct {
+	*ObfsUDPHopClientPacketConn
+}
+
+func (c *ObfsUDPHopClientPacketConnWithSyscall) SyscallConn() (syscall.RawConn, error) {
+	c.connMutex.RLock()
+	defer c.connMutex.RUnlock()
+	sc, ok := c.currentConn.(syscall.Conn)
+	if !ok {
+		return nil, errors.New("not supported")
+	}
+	return sc.SyscallConn()
+}
+
+// parsePorts parses the multi-port server address and returns the host and ports.
 // Supports both comma-separated single ports and dash-separated port ranges.
 // Format: "host:port1,port2-port3,port4"
-func parseAddr(addr string) (host string, ports []uint16, err error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", nil, err
-	}
-	portStrs := strings.Split(portStr, ",")
+func parsePorts(serverPorts string) (ports []uint16, err error) {
+	portStrs := strings.Split(serverPorts, ",")
 	for _, portStr := range portStrs {
 		if strings.Contains(portStr, "-") {
 			// Port range
 			portRange := strings.Split(portStr, "-")
 			if len(portRange) != 2 {
-				return "", nil, net.InvalidAddrError("invalid port range")
+				return nil, net.InvalidAddrError("invalid port range")
 			}
 			start, err := strconv.ParseUint(portRange[0], 10, 16)
 			if err != nil {
-				return "", nil, net.InvalidAddrError("invalid port range")
+				return nil, net.InvalidAddrError("invalid port range")
 			}
 			end, err := strconv.ParseUint(portRange[1], 10, 16)
 			if err != nil {
-				return "", nil, net.InvalidAddrError("invalid port range")
+				return nil, net.InvalidAddrError("invalid port range")
 			}
 			if start > end {
 				start, end = end, start
@@ -341,10 +353,13 @@ func parseAddr(addr string) (host string, ports []uint16, err error) {
 			// Single port
 			port, err := strconv.ParseUint(portStr, 10, 16)
 			if err != nil {
-				return "", nil, net.InvalidAddrError("invalid port")
+				return nil, net.InvalidAddrError("invalid port")
 			}
 			ports = append(ports, uint16(port))
 		}
 	}
-	return host, ports, nil
+	if len(ports) == 0 {
+		return nil, net.InvalidAddrError("invalid port")
+	}
+	return ports, nil
 }

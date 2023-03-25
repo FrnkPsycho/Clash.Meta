@@ -114,9 +114,6 @@ func NewAuthenticate(TKN [32]byte) Authenticate {
 
 func ReadAuthenticateWithHead(head CommandHead, reader BufferedReader) (c Authenticate, err error) {
 	c.CommandHead = head
-	if err != nil {
-		return
-	}
 	if c.CommandHead.TYPE != AuthenticateType {
 		err = fmt.Errorf("error command type: %s", c.CommandHead.TYPE)
 		return
@@ -170,9 +167,6 @@ func NewConnect(ADDR Address) Connect {
 
 func ReadConnectWithHead(head CommandHead, reader BufferedReader) (c Connect, err error) {
 	c.CommandHead = head
-	if err != nil {
-		return
-	}
 	if c.CommandHead.TYPE != ConnectType {
 		err = fmt.Errorf("error command type: %s", c.CommandHead.TYPE)
 		return
@@ -228,9 +222,6 @@ func NewPacket(ASSOC_ID uint32, LEN uint16, ADDR Address, DATA []byte) Packet {
 
 func ReadPacketWithHead(head CommandHead, reader BufferedReader) (c Packet, err error) {
 	c.CommandHead = head
-	if err != nil {
-		return
-	}
 	if c.CommandHead.TYPE != PacketType {
 		err = fmt.Errorf("error command type: %s", c.CommandHead.TYPE)
 		return
@@ -291,6 +282,8 @@ func (c Packet) BytesLen() int {
 	return c.CommandHead.BytesLen() + 4 + 2 + c.ADDR.BytesLen() + len(c.DATA)
 }
 
+var PacketOverHead = NewPacket(0, 0, NewAddressAddrPort(netip.AddrPortFrom(netip.IPv6Unspecified(), 0)), nil).BytesLen()
+
 type Dissociate struct {
 	CommandHead
 	ASSOC_ID uint32
@@ -305,9 +298,6 @@ func NewDissociate(ASSOC_ID uint32) Dissociate {
 
 func ReadDissociateWithHead(head CommandHead, reader BufferedReader) (c Dissociate, err error) {
 	c.CommandHead = head
-	if err != nil {
-		return
-	}
 	if c.CommandHead.TYPE != DissociateType {
 		err = fmt.Errorf("error command type: %s", c.CommandHead.TYPE)
 		return
@@ -454,12 +444,10 @@ func NewAddress(metadata *C.Metadata) Address {
 	switch metadata.AddrType() {
 	case socks5.AtypIPv4:
 		addrType = AtypIPv4
-		addr = make([]byte, net.IPv4len)
-		copy(addr[:], metadata.DstIP.AsSlice())
+		addr = metadata.DstIP.AsSlice()
 	case socks5.AtypIPv6:
 		addrType = AtypIPv6
-		addr = make([]byte, net.IPv6len)
-		copy(addr[:], metadata.DstIP.AsSlice())
+		addr = metadata.DstIP.AsSlice()
 	case socks5.AtypDomainName:
 		addrType = AtypDomainName
 		addr = make([]byte, len(metadata.Host)+1)
@@ -478,19 +466,17 @@ func NewAddress(metadata *C.Metadata) Address {
 
 func NewAddressAddrPort(addrPort netip.AddrPort) Address {
 	var addrType byte
-	var addr []byte
-	if addrPort.Addr().Is4() {
+	port := addrPort.Port()
+	addr := addrPort.Addr().Unmap()
+	if addr.Is4() {
 		addrType = AtypIPv4
-		addr = make([]byte, net.IPv4len)
 	} else {
 		addrType = AtypIPv6
-		addr = make([]byte, net.IPv6len)
 	}
-	copy(addr[:], addrPort.Addr().AsSlice())
 	return Address{
 		TYPE: addrType,
-		ADDR: addr,
-		PORT: addrPort.Port(),
+		ADDR: addr.AsSlice(),
+		PORT: port,
 	}
 }
 

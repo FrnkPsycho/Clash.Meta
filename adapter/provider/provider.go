@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/dlclark/regexp2"
-	"gopkg.in/yaml.v3"
 	"net/http"
 	"runtime"
 	"strings"
@@ -19,6 +17,9 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 	types "github.com/Dreamacro/clash/constant/provider"
 	"github.com/Dreamacro/clash/log"
+
+	"github.com/dlclark/regexp2"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -79,6 +80,7 @@ func (pp *proxySetProvider) Initial() error {
 		return err
 	}
 	pp.OnUpdate(elm)
+	pp.getSubscriptionInfo()
 	return nil
 }
 
@@ -98,7 +100,7 @@ func (pp *proxySetProvider) setProxies(proxies []C.Proxy) {
 	pp.proxies = proxies
 	pp.healthCheck.setProxy(proxies)
 	if pp.healthCheck.auto() {
-		defer func() { go pp.healthCheck.lazyCheck() }()
+		go pp.healthCheck.check()
 	}
 }
 
@@ -141,11 +143,16 @@ func stopProxyProvider(pd *ProxySetProvider) {
 	_ = pd.Fetcher.Destroy()
 }
 
-func NewProxySetProvider(name string, interval time.Duration, filter string, excludeFilter string, vehicle types.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
+func NewProxySetProvider(name string, interval time.Duration, filter string, excludeFilter string, excludeType string, vehicle types.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
 	excludeFilterReg, err := regexp2.Compile(excludeFilter, 0)
 	if err != nil {
 		return nil, fmt.Errorf("invalid excludeFilter regex: %w", err)
 	}
+	var excludeTypeArray []string
+	if excludeType != "" {
+		excludeTypeArray = strings.Split(excludeType, "|")
+	}
+
 	var filterRegs []*regexp2.Regexp
 	for _, filter := range strings.Split(filter, "`") {
 		filterReg, err := regexp2.Compile(filter, 0)
@@ -164,10 +171,8 @@ func NewProxySetProvider(name string, interval time.Duration, filter string, exc
 		healthCheck: hc,
 	}
 
-	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, proxiesParseAndFilter(filter, excludeFilter, filterRegs, excludeFilterReg), proxiesOnUpdate(pd))
+	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, proxiesParseAndFilter(filter, excludeFilter, excludeTypeArray, filterRegs, excludeFilterReg), proxiesOnUpdate(pd))
 	pd.Fetcher = fetcher
-
-	pd.getSubscriptionInfo()
 	wrapper := &ProxySetProvider{pd}
 	runtime.SetFinalizer(wrapper, stopProxyProvider)
 	return wrapper, nil
@@ -262,7 +267,7 @@ func proxiesOnUpdate(pd *proxySetProvider) func([]C.Proxy) {
 	}
 }
 
-func proxiesParseAndFilter(filter string, excludeFilter string, filterRegs []*regexp2.Regexp, excludeFilterReg *regexp2.Regexp) resource.Parser[[]C.Proxy] {
+func proxiesParseAndFilter(filter string, excludeFilter string, excludeTypeArray []string, filterRegs []*regexp2.Regexp, excludeFilterReg *regexp2.Regexp) resource.Parser[[]C.Proxy] {
 	return func(buf []byte) ([]C.Proxy, error) {
 		schema := &ProxySchema{}
 
@@ -282,6 +287,28 @@ func proxiesParseAndFilter(filter string, excludeFilter string, filterRegs []*re
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range filterRegs {
 			for idx, mapping := range schema.Proxies {
+				if nil != excludeTypeArray && len(excludeTypeArray) > 0 {
+					mType, ok := mapping["type"]
+					if !ok {
+						continue
+					}
+					pType, ok := mType.(string)
+					if !ok {
+						continue
+					}
+					flag := false
+					for i := range excludeTypeArray {
+						if strings.EqualFold(pType, excludeTypeArray[i]) {
+							flag = true
+							break
+						}
+
+					}
+					if flag {
+						continue
+					}
+
+				}
 				mName, ok := mapping["name"]
 				if !ok {
 					continue
